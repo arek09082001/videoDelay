@@ -73,7 +73,8 @@ class DelayCamEngine(private val context: Context) {
             settings.bufferSeconds,
         )
         ring = EncodedRingBuffer(profile.bufferBytes, profile.maxSamples)
-        playback = PlaybackController(ring, VideoDecoder(ring))
+        // Decoder-Fehler landen als Klartext im Fehlerbanner der Oberfläche.
+        playback = PlaybackController(ring, VideoDecoder(ring), ::fail)
         playback.setDelayUs(settings.delayUs)
 
         val enc = VideoEncoder(profile, ring, ::fail)

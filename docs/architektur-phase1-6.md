@@ -370,7 +370,42 @@ object ClipExporter {
 - Samples per `copySampleInto` in einen einmalig allozierten Direct-Buffer (Größe ~2 MB) holen;
   liefert ein Sample `-1` (verdrängt), Export mit Fehler „Puffer hat den Bereich überschrieben“ abbrechen.
 
-## 11. Rotation (Info für playback/ui)
+## 11. Abweichungen vom Vertrag (Abschlussbericht)
+
+Der Vertrag verlangt, Abweichungen hier festzuhalten. Es sind fünf, alle additiv — bestehende
+Signaturen bleiben aufrufkompatibel:
+
+1. **`playback/Clock.kt` (neu)** — `Clock`, `PlaybackScheduler` (+ `HandlerScheduler`) und
+   `DecoderPort`. Ohne diese Nähte wäre der `PlaybackController` nur auf einem Gerät prüfbar:
+   Zeit und Scheduling sind seine eigentliche Logik. Plan §14 fordert die Uhr ausdrücklich
+   („Zeit immer über ein `Clock`-Interface"). `VideoDecoder` implementiert `DecoderPort`
+   unverändert.
+2. **`PlaybackController`-Konstruktor** — drei zusätzliche Parameter mit Defaults
+   (`onPlaybackError`, `clock`, `newScheduler`). `PlaybackController(ring, decoder)` bleibt gültig.
+3. **`PlaybackController.start(surface: Surface?, …)`** — nullbar, damit der JVM-Test ohne echte
+   Surface startet. Produktiv wird immer die `SurfaceView`-Surface übergeben.
+4. **`DrawingOverlayView.drawingEnabled` statt `enabled`** — `View` besitzt bereits
+   `setEnabled()`; ein Kotlin-Property `enabled` würde auf JVM-Ebene kollidieren. Der
+   Zwei-Finger-Tipp wird zusätzlich in dieser View erkannt, damit „LIVE" auch bei aktivem Stift
+   erreichbar bleibt (Plan §5).
+5. **`ui/UiTokens.kt` (neu)** — Farben, Touch-Größen und Schriftgrößen an einer Stelle, damit
+   „≥ 64 dp, ≥ 16 sp" in allen Leisten wirklich eingehalten wird.
+
+Zwei inhaltliche Ergänzungen zur Zustandsmaschine, die sich aus den Tests ergaben:
+
+* **Seek-Sperre.** Zwischen Flush und erstem fertigen Bild vergehen mehrere Pump-Takte, in denen
+  `positionPtsUs` noch den alten Stand zeigt. Ohne Sperre lösen Drift- und Loop-Regel in jedem
+  dieser Takte einen neuen Seek aus — die Wiedergabe setzt sich endlos neu auf und zeigt nie ein
+  Bild. Die Sperre löst sich mit dem ersten gerenderten Frame, spätestens nach 1 s.
+* **Geschwindigkeit und Modus.** Zeitlupe aus LIVE heraus wechselt jetzt selbst nach REPLAY
+  (sonst kämpft die Drift-Regel gegen die Verlangsamung), und der Übergang REPLAY→LIVE setzt die
+  Rate auf 1× zurück (sonst liefe LIVE mit Aufholgeschwindigkeit über die Live-Kante hinaus).
+
+Nicht umgesetzt: das `FrameSource`-Interface aus Plan §13.1 samt `SyntheticFrameSource`/
+`FileFrameSource` — dieser Vertrag ersetzt es durch `CameraController`. Damit entfallen auch die
+instrumentierten Delay-Tests aus Plan §13.2b.
+
+## 12. Rotation (Info für playback/ui)
 
 Der Integrator berechnet `rotationDegrees = (sensorOrientation − displayRotation + 360) % 360`
 und reicht ihn an `PlaybackController.start(...)` durch; `videoAspect` in der Engine ist bereits

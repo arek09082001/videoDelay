@@ -33,6 +33,13 @@ android {
     buildFeatures {
         compose = true
     }
+
+    // JVM-Unit-Tests (Plan §13.2a) laufen ohne Emulator gegen die „mockable" android.jar:
+    // Stub-Methoden liefern Standardwerte statt zu werfen. Damit sind RingBuffer und
+    // Playback-Zustandsmaschine in Sekunden testbar — inklusive MediaCodec.BufferInfo.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 kotlin {
@@ -47,4 +54,6 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+
+    testImplementation(libs.junit)
 }
