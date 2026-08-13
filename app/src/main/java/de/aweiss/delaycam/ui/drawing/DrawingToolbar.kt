@@ -60,7 +60,9 @@ fun DrawingToolbar(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        PadButton(label = "✏", active = penActive, compact = true, onClick = onTogglePen)
+        // Volle Touch-Größe: Das ist der Einstieg ins Zeichnen und muss ohne Hinsehen treffbar
+        // sein — auch aus LIVE heraus, wo er die einzige sichtbare Zeichen-Bedienung ist.
+        PadButton(label = "✏", active = penActive, onClick = onTogglePen)
 
         if (penActive) {
             for ((label, t) in TOOLS) {
