@@ -2,7 +2,6 @@ package de.aweiss.delaycam.ui.drawing
 
 import android.content.Context
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.util.AttributeSet
@@ -18,10 +17,14 @@ import kotlin.math.sin
  * Compose-Canvas: Nur hier gibt es `requestUnbufferedDispatch()`, und das ist der Unterschied
  * zwischen „der Strich klebt am Stift" und „der Strich hinkt hinterher".
  *
+ * Die View hängt nur im Baum, **solange der Stift aktiv ist** — dann liegt sie zuoberst über dem
+ * Bild und bekommt die Berührungen zuverlässig. Ist der Stift aus, zeichnet Compose die Striche
+ * aus demselben [DrawingBoard], und im Baum steht nichts, was den Wischgesten dazwischenfunken
+ * könnte. Deshalb liegen die Striche im Board und nicht in dieser View.
+ *
  * Der S Pen liefert Druckwerte. Da ein `Path` nur eine Strichbreite kennt, wird ein Freihandzug
  * bei deutlicher Druckänderung in Teilstücke zerlegt (jedes mit eigener Breite). Alle Teilstücke
- * eines Zuges teilen sich eine `groupId` — Undo nimmt immer den ganzen Zug zurück, nie ein
- * einzelnes Teilstück.
+ * eines Zuges teilen sich eine Gruppen-Nummer — Undo nimmt immer den ganzen Zug zurück.
  */
 class DrawingOverlayView @JvmOverloads constructor(
     context: Context,
@@ -30,35 +33,24 @@ class DrawingOverlayView @JvmOverloads constructor(
 
     enum class Tool { FREIHAND, LINIE, PFEIL, KREIS, RECHTECK }
 
-    private class Stroke(val path: Path, val paint: Paint, val groupId: Int)
-
-    private val strokes = ArrayList<Stroke>(64)
-    private val undone = ArrayList<Stroke>(64)
+    /** Gemeinsamer Strich-Speicher; muss vor der ersten Berührung gesetzt sein. */
+    var board: DrawingBoard? = null
 
     private var tool = Tool.FREIHAND
-    private var color = Color.WHITE
+    private var color = android.graphics.Color.WHITE
     private var strokeWidthPx = dp(6f)
-
-    /**
-     * Heißt bewusst nicht `enabled`: `View` besitzt bereits `setEnabled()`, die Signaturen
-     * würden sich auf JVM-Ebene überschreiben.
-     */
-    var drawingEnabled: Boolean = false
-        set(value) {
-            field = value
-            if (!value) cancelCurrent()
-        }
 
     /** Wird beim ersten Punkt eines Zuges gerufen — die UI friert daraufhin das Bild ein. */
     var onStrokeStarted: (() -> Unit)? = null
 
-    /** Zwei-Finger-Tipp auch bei aktivem Stift (Plan §5: „LIVE ist überall erreichbar"). */
+    /** Zwei-Finger-Tipp: „zurück zu LIVE" muss auch bei aktivem Stift erreichbar sein (Plan §5). */
     var onTwoFingerTap: (() -> Unit)? = null
 
     // ─── Zustand des laufenden Zuges ───
     private var activePath: Path? = null
     private var activePaint: Paint? = null
-    private var groupCounter = 0
+    private var activeOutline: Paint? = null
+    private var activeGroup = 0
     private var startX = 0f
     private var startY = 0f
     private var lastX = 0f
@@ -86,37 +78,7 @@ class DrawingOverlayView @JvmOverloads constructor(
         strokeWidthPx = dp(widthDp)
     }
 
-    fun undo() {
-        if (strokes.isEmpty()) return
-        val group = strokes.last().groupId
-        while (strokes.isNotEmpty() && strokes.last().groupId == group) {
-            undone.add(strokes.removeAt(strokes.size - 1))
-        }
-        invalidate()
-    }
-
-    fun redo() {
-        if (undone.isEmpty()) return
-        val group = undone.last().groupId
-        while (undone.isNotEmpty() && undone.last().groupId == group) {
-            strokes.add(undone.removeAt(undone.size - 1))
-        }
-        invalidate()
-    }
-
-    fun clearAll() {
-        if (strokes.isEmpty() && undone.isEmpty() && activePath == null) return
-        strokes.clear()
-        undone.clear()
-        cancelCurrent()
-        invalidate()
-    }
-
-    fun hasContent(): Boolean = strokes.isNotEmpty()
-
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (!drawingEnabled) return false
-
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 // Der eigentliche Latenz-Trick: ungepufferte Events statt einmal pro Frame.
@@ -166,23 +128,24 @@ class DrawingOverlayView @JvmOverloads constructor(
     }
 
     private fun beginStroke(event: MotionEvent) {
+        val b = board ?: return
         onStrokeStarted?.invoke()
-        undone.clear()
-        groupCounter++
+        activeGroup = b.beginGroup()
         startX = event.x
         startY = event.y
         lastX = startX
         lastY = startY
         segmentPressure = pressureOf(event)
-        val path = Path().apply { moveTo(startX, startY) }
-        activePath = path
-        activePaint = newPaint(segmentPressure)
+        activePath = Path().apply { moveTo(startX, startY) }
+        newPaints(segmentPressure)
         invalidate()
     }
 
     private fun continueStroke(event: MotionEvent) {
+        val b = board ?: return
         val path = activePath ?: return
         val paint = activePaint ?: return
+        val outline = activeOutline ?: return
 
         if (tool == Tool.FREIHAND) {
             // Zwischenpunkte mitnehmen (der Stift liefert mehr Punkte als Frames) und weich
@@ -196,10 +159,10 @@ class DrawingOverlayView @JvmOverloads constructor(
             if (kotlin.math.abs(pressure - segmentPressure) > PRESSURE_STEP) {
                 // Neues Teilstück mit anderer Breite; es beginnt exakt am letzten Punkt,
                 // damit keine Lücke entsteht.
-                strokes.add(Stroke(path, paint, groupCounter))
+                b.add(DrawingBoard.Stroke(path, paint, outline, activeGroup))
                 segmentPressure = pressure
                 activePath = Path().apply { moveTo(lastX, lastY) }
-                activePaint = newPaint(pressure)
+                newPaints(pressure)
             }
         } else {
             rebuildShape(path, event.x, event.y)
@@ -210,8 +173,10 @@ class DrawingOverlayView @JvmOverloads constructor(
     }
 
     private fun finishStroke(event: MotionEvent) {
+        val b = board ?: return
         val path = activePath ?: return
         val paint = activePaint ?: return
+        val outline = activeOutline ?: return
         if (tool == Tool.FREIHAND) {
             addFreehandPoint(path, event.x, event.y)
             // Ein reiner Tipp ohne Bewegung wäre unsichtbar — einen Punkt setzen.
@@ -221,19 +186,18 @@ class DrawingOverlayView @JvmOverloads constructor(
         } else {
             rebuildShape(path, event.x, event.y)
         }
-        strokes.add(Stroke(path, paint, groupCounter))
+        b.add(DrawingBoard.Stroke(path, paint, outline, activeGroup))
         activePath = null
         activePaint = null
+        activeOutline = null
         invalidate()
     }
 
     private fun cancelCurrent() {
-        // Auch bereits abgelegte Teilstücke dieses Zuges wieder entfernen.
-        while (strokes.isNotEmpty() && strokes.last().groupId == groupCounter && activePath != null) {
-            strokes.removeAt(strokes.size - 1)
-        }
+        if (activePath != null) board?.dropGroup(activeGroup)
         activePath = null
         activePaint = null
+        activeOutline = null
     }
 
     private fun addFreehandPoint(path: Path, x: Float, y: Float) {
@@ -283,19 +247,13 @@ class DrawingOverlayView @JvmOverloads constructor(
         }
     }
 
-    private fun newPaint(pressure: Float): Paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-        color = this@DrawingOverlayView.color
-        strokeWidth = strokeWidthPx * pressure
-        // Dunkler Rand macht die Linie auch auf hellem Hallenboden sichtbar.
-        setShadowLayer(strokeWidthPx * 0.6f, 0f, 0f, Color.argb(160, 0, 0, 0))
+    private fun newPaints(pressure: Float) {
+        val (fill, outline) = DrawingBoard.paints(color, strokeWidthPx * pressure)
+        activePaint = fill
+        activeOutline = outline
     }
 
-    /**
-     * Druck nur beim Stift auswerten (Finger melden konstant 1,0): 0..1 → Faktor 0,6..1,6.
-     */
+    /** Druck nur beim Stift auswerten (Finger melden konstant 1,0): 0..1 → Faktor 0,6..1,6. */
     private fun pressureOf(event: MotionEvent): Float {
         if (event.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) return 1f
         if (tool != Tool.FREIHAND) return 1f
@@ -304,13 +262,14 @@ class DrawingOverlayView @JvmOverloads constructor(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        for (i in strokes.indices) {
-            val s = strokes[i]
-            canvas.drawPath(s.path, s.paint)
-        }
+        board?.draw(canvas)
         val path = activePath
         val paint = activePaint
-        if (path != null && paint != null) canvas.drawPath(path, paint)
+        val outline = activeOutline
+        if (path != null && paint != null && outline != null) {
+            canvas.drawPath(path, outline)
+            canvas.drawPath(path, paint)
+        }
     }
 
     private fun dp(value: Float): Float = value * resources.displayMetrics.density

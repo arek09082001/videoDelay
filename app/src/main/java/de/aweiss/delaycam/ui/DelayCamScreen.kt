@@ -7,6 +7,7 @@ import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,6 +39,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
@@ -49,6 +52,7 @@ import de.aweiss.delaycam.AppSettings
 import de.aweiss.delaycam.DelayCamEngine
 import de.aweiss.delaycam.playback.PlayMode
 import de.aweiss.delaycam.playback.Timeline
+import de.aweiss.delaycam.ui.drawing.DrawingBoard
 import de.aweiss.delaycam.ui.drawing.DrawingColors
 import de.aweiss.delaycam.ui.drawing.DrawingOverlayView
 import de.aweiss.delaycam.ui.drawing.DrawingToolbar
@@ -90,7 +94,7 @@ fun DelayCamScreen(engine: DelayCamEngine, settings: MutableState<AppSettings>) 
     var tool by remember { mutableStateOf(DrawingOverlayView.Tool.PFEIL) }
     var penColor by remember { mutableStateOf(DrawingColors[1]) }
     var penWidth by remember { mutableFloatStateOf(DrawingWidths[1]) }
-    var overlay by remember { mutableStateOf<DrawingOverlayView?>(null) }
+    val board = remember { DrawingBoard() }
     var markerA by remember { mutableLongStateOf(-1L) }
     var markerB by remember { mutableLongStateOf(-1L) }
 
@@ -136,7 +140,7 @@ fun DelayCamScreen(engine: DelayCamEngine, settings: MutableState<AppSettings>) 
     fun goLive() {
         engine.playback.goLive()
         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-        if (settings.value.clearDrawingOnLive) overlay?.clearAll()
+        if (settings.value.clearDrawingOnLive) board.clearAll()
         penActive = false
         markerA = -1
         markerB = -1
@@ -199,26 +203,38 @@ fun DelayCamScreen(engine: DelayCamEngine, settings: MutableState<AppSettings>) 
                 )
 
                 // ── 2. Zeichenebene direkt über dem Bild ──────────────────────
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { ctx -> DrawingOverlayView(ctx).also { overlay = it } },
-                    update = { view ->
-                        view.drawingEnabled = penActive
-                        view.setTool(tool)
-                        view.setColor(penColor.toArgb())
-                        view.setStrokeWidthDp(penWidth)
-                        view.onStrokeStarted = {
-                            if (settings.value.freezeOnDraw) engine.playback.freeze()
-                        }
-                        view.onTwoFingerTap = { goLive() }
-                    },
-                )
+                // Nur bei aktivem Stift hängt hier eine echte View: dann liegt sie zuoberst und
+                // bekommt die Berührungen sicher. Ist der Stift aus, zeichnet Compose dieselben
+                // Striche — ohne Touch-Ziel, damit die Wischgesten unangetastet bleiben.
+                if (penActive) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { ctx -> DrawingOverlayView(ctx).apply { this.board = board } },
+                        update = { view ->
+                            view.board = board
+                            view.setTool(tool)
+                            view.setColor(penColor.toArgb())
+                            view.setStrokeWidthDp(penWidth)
+                            view.onStrokeStarted = {
+                                if (settings.value.freezeOnDraw) engine.playback.freeze()
+                            }
+                            view.onTwoFingerTap = { goLive() }
+                        },
+                    )
+                } else {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        board.version // Lesezugriff: neu zeichnen, sobald sich etwas ändert
+                        drawIntoCanvas { canvas -> board.draw(canvas.nativeCanvas) }
+                    }
+                }
             }
         }
 
-        // ── 3. Gesten (bei aktivem Stift gehören die Berührungen dem Overlay) ─
-        GestureLayer(
-            enabled = !penActive,
+        // ── 3. Gesten — bei aktivem Stift gar nicht erst im Baum, sonst läge eine
+        // Touch-Schicht über der Zeichenebene. Der Zwei-Finger-Tipp für „LIVE" wird in
+        // diesem Fall von der Zeichen-View selbst erkannt.
+        if (!penActive) GestureLayer(
+            enabled = true,
             onTap = {
                 if (modeOrdinal == PlayMode.LIVE_DELAY.ordinal) {
                     engine.playback.freeze()
@@ -308,30 +324,29 @@ fun DelayCamScreen(engine: DelayCamEngine, settings: MutableState<AppSettings>) 
                 .padding(12.dp),
         )
 
-        // ── 6. Zeichen-Werkzeuge (nur bei stehendem Bild oder aktivem Stift) ─
-        val frozen = modeOrdinal == PlayMode.PAUSED.ordinal || modeOrdinal == PlayMode.LOOP.ordinal
-        if (frozen || penActive) {
-            DrawingToolbar(
-                penActive = penActive,
-                tool = tool,
-                color = penColor,
-                widthDp = penWidth,
-                onTogglePen = {
-                    penActive = !penActive
-                    if (penActive && settings.value.freezeOnDraw) engine.playback.freeze()
-                    touched()
-                },
-                onTool = { tool = it },
-                onColor = { penColor = it },
-                onWidth = { penWidth = it },
-                onUndo = { overlay?.undo() },
-                onRedo = { overlay?.redo() },
-                onClear = { overlay?.clearAll() },
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .padding(end = 12.dp),
-            )
-        }
+        // ── 6. Zeichen-Werkzeuge ──────────────────────────────────────────────
+        // Der Stift-Knopf ist immer da: Aus LIVE heraus wäre er sonst unerreichbar, und dann
+        // käme man nie zum Zeichnen. Das Antippen friert das Bild ein (Plan §6).
+        DrawingToolbar(
+            penActive = penActive,
+            tool = tool,
+            color = penColor,
+            widthDp = penWidth,
+            onTogglePen = {
+                penActive = !penActive
+                if (penActive && settings.value.freezeOnDraw) engine.playback.freeze()
+                touched()
+            },
+            onTool = { tool = it },
+            onColor = { penColor = it },
+            onWidth = { penWidth = it },
+            onUndo = { board.undo() },
+            onRedo = { board.redo() },
+            onClear = { board.clearAll() },
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 12.dp),
+        )
 
         // ── 7. Timeline + Bedienleiste, ausblendbar ───────────────────────────
         AnimatedVisibility(
