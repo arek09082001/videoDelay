@@ -33,6 +33,14 @@ class DrawingBoard {
     var version by mutableIntStateOf(0)
         private set
 
+    /**
+     * Meldet Änderungen an die Zeichen-`View`. Compose merkt Änderungen von selbst über
+     * [version] — eine klassische View nicht: Sie zeichnet nur neu, wenn jemand `invalidate()`
+     * ruft. Ohne diesen Rückkanal ändern Rückgängig und Löschen zwar die Daten, auf dem Schirm
+     * bliebe aber das alte Bild stehen. Wird von der View beim Anhängen gesetzt.
+     */
+    var onChanged: (() -> Unit)? = null
+
     /** Beginnt einen neuen Zug (ein Zug kann aus mehreren Druckstufen-Teilstücken bestehen). */
     fun beginGroup(): Int {
         undone.clear()
@@ -42,7 +50,7 @@ class DrawingBoard {
 
     fun add(stroke: Stroke) {
         strokes.add(stroke)
-        version++
+        bump()
     }
 
     /** Bricht einen laufenden Zug ab (zweiter Finger, Abbruch durch das System). */
@@ -52,7 +60,7 @@ class DrawingBoard {
             strokes.removeAt(strokes.size - 1)
             changed = true
         }
-        if (changed) version++
+        if (changed) bump()
     }
 
     /** Nimmt immer den ganzen Zug zurück, nie ein einzelnes Teilstück. */
@@ -62,7 +70,7 @@ class DrawingBoard {
         while (strokes.isNotEmpty() && strokes.last().group == group) {
             undone.add(strokes.removeAt(strokes.size - 1))
         }
-        version++
+        bump()
     }
 
     fun redo() {
@@ -71,17 +79,23 @@ class DrawingBoard {
         while (undone.isNotEmpty() && undone.last().group == group) {
             strokes.add(undone.removeAt(undone.size - 1))
         }
-        version++
+        bump()
     }
 
     fun clearAll() {
         if (strokes.isEmpty() && undone.isEmpty()) return
         strokes.clear()
         undone.clear()
-        version++
+        bump()
     }
 
     fun isEmpty(): Boolean = strokes.isEmpty()
+
+    /** Beide Renderer anstoßen: Compose über den Zähler, die View über ihren Rückkanal. */
+    private fun bump() {
+        version++
+        onChanged?.invoke()
+    }
 
     fun draw(canvas: Canvas) {
         for (i in strokes.indices) {

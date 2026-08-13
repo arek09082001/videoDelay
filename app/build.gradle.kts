@@ -14,8 +14,8 @@ android {
         applicationId = "de.aweiss.delaycam"
         minSdk = 29
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.0.0"
+        versionCode = 3
+        versionName = "1.0.1"
     }
 
     buildTypes {

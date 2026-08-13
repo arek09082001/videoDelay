@@ -33,8 +33,21 @@ class DrawingOverlayView @JvmOverloads constructor(
 
     enum class Tool { FREIHAND, LINIE, PFEIL, KREIS, RECHTECK }
 
-    /** Gemeinsamer Strich-Speicher; muss vor der ersten Berührung gesetzt sein. */
+    /**
+     * Gemeinsamer Strich-Speicher; muss vor der ersten Berührung gesetzt sein.
+     *
+     * Beim Setzen wird der Rückkanal umgehängt: Ändert jemand von außen etwas am Board
+     * (Rückgängig, Wiederholen, Alles löschen aus der Werkzeugleiste), muss diese View neu
+     * zeichnen — von allein merkt sie davon nichts.
+     */
     var board: DrawingBoard? = null
+        set(value) {
+            if (field === value) return
+            field?.onChanged = null
+            field = value
+            value?.onChanged = { invalidate() }
+            invalidate()
+        }
 
     private var tool = Tool.FREIHAND
     private var color = android.graphics.Color.WHITE
@@ -76,6 +89,18 @@ class DrawingOverlayView @JvmOverloads constructor(
 
     fun setStrokeWidthDp(widthDp: Float) {
         strokeWidthPx = dp(widthDp)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        board?.onChanged = { invalidate() }
+    }
+
+    override fun onDetachedFromWindow() {
+        // Stift aus: Ab jetzt zeichnet Compose. Der Rückkanal auf diese tote View muss weg,
+        // sonst zeigt ein späteres „Rückgängig" ins Leere.
+        board?.onChanged = null
+        super.onDetachedFromWindow()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
