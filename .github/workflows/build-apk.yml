@@ -22,10 +22,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: JDK 17 einrichten
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -33,10 +33,20 @@ jobs:
 
       # Der Runner bringt das Android SDK schon mit; hier wird nur sichergestellt,
       # dass Platform und Build-Tools in der Version aus app/build.gradle.kts da sind.
+      # sdkmanager liegt nicht im PATH, sondern in den cmdline-tools des SDK.
       - name: Android SDK ergänzen
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" > /dev/null
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$SDK/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -1)
+          fi
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager nicht gefunden — verlasse mich auf die Vorinstallation des Runners"
+            exit 0
+          fi
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" > /dev/null
 
       - name: Unit-Tests
         run: ./gradlew testDebugUnitTest
