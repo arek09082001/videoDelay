@@ -1,0 +1,85 @@
+name: APK bauen
+
+# Bei jedem Push auf main: Tests laufen lassen, APK bauen und ans Release „latest"
+# hängen. Damit gibt es einen festen Download-Link fürs Tablet, ohne dass ein
+# 24-MB-Binary in der Git-Historie landet:
+#
+#   https://github.com/arek09082001/videoDelay/releases/latest/download/delay-cam.apk
+#
+# Auf Pull Requests wird nur gebaut und getestet — kein Release.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: JDK 17 einrichten
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      # Der Runner bringt das Android SDK schon mit; hier wird nur sichergestellt,
+      # dass Platform und Build-Tools in der Version aus app/build.gradle.kts da sind.
+      # sdkmanager liegt nicht im PATH, sondern in den cmdline-tools des SDK.
+      - name: Android SDK ergänzen
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$SDK/cmdline-tools" -name sdkmanager -type f 2>/dev/null | head -1)
+          fi
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager nicht gefunden — verlasse mich auf die Vorinstallation des Runners"
+            exit 0
+          fi
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+
+      - name: Unit-Tests
+        run: ./gradlew testDebugUnitTest
+
+      - name: APK bauen
+        run: ./gradlew assembleDebug
+
+      - name: APK benennen
+        id: apk
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk delay-cam.apk
+          VERSION=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # Auch für PR-Läufe verfügbar (Actions-Tab → Lauf → Artifacts).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: delay-cam-apk
+          path: delay-cam.apk
+
+      # Nur auf main: Release „latest" aktualisieren. Der Tag bleibt bestehen,
+      # nur die Datei wird ersetzt — dadurch bleibt der Download-Link stabil.
+      - name: Release aktualisieren
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTE="Automatisch gebaut aus ${GITHUB_SHA::7} — Version ${{ steps.apk.outputs.version }}"
+          if gh release view latest > /dev/null 2>&1; then
+            gh release upload latest delay-cam.apk --clobber
+            gh release edit latest --notes "$NOTE"
+          else
+            gh release create latest delay-cam.apk \
+              --title "Delay-Cam (aktueller Stand)" \
+              --notes "$NOTE"
+          fi
